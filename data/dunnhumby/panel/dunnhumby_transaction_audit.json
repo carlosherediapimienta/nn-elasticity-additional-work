@@ -1,0 +1,14 @@
+{
+  "rows": 2595732,
+  "households": 2500,
+  "stores": 582,
+  "products": 92339,
+  "weeks": 102,
+  "week_min": 1,
+  "week_max": 102,
+  "quantity_le_0": 14466,
+  "sales_value_le_0": 18850,
+  "missing_product": 0,
+  "missing_store": 0,
+  "missing_week": 0
+}

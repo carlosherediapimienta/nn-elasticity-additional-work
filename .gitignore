@@ -1,0 +1,39 @@
+# Virtual environments
+venv-icdn/
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Raw competition dumps and derived panels (too large for git)
+data/**/*.csv
+data/**/*.parquet
+*.parquet
+
+# Keep the frozen sample (paper reproducibility)
+!data/**/panel/*selected*
+!data/**/panel/*_audit.json
+!data/**/panel/*diagnostics.csv
+
+# Local secrets / env
+.env
+.env.*
