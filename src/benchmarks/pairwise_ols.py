@@ -1,72 +1,81 @@
-# src/benchmarks/pairwise_ols.py
 import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+SHORT = ["promo", "sin_52", "cos_52"]
+MIN_DOF = 30
+MIN_STORES_CROSS = 3
+MAX_VIF = 10.0
 
 
 class PairwiseOLS:
-    GROUP_KEYS = ["store_code", "pair_id", "product_i", "product_j"]
+    def __init__(self, control_cols=None):
+        self.control_cols = list(control_cols or SHORT)
 
-    def __init__(self, control_cols: list[str], min_obs: int = 15, robust_cov_type: str = "HC1"):
-        self.control_cols = control_cols
-        self.min_obs = min_obs
-        rhs = "log_p_i + log_p_j"
-        if control_cols:
-            rhs += " + " + " + ".join(control_cols)
-        self._formula = f"log_v_i ~ {rhs}"
+    def _n_params(self, n_stores, n_prices):
+        return 1 + n_prices + len(self.control_cols) + max(n_stores - 1, 0)
 
-    def run(self, train_df: pd.DataFrame, val_df: pd.DataFrame):
-        needed = ["log_v_i", "log_p_i", "log_p_j", "week_id"] + self.control_cols
-        train_groups = {k: g[needed].dropna() for k, g in train_df.groupby(self.GROUP_KEYS)}
-        val_groups = {k: g[needed].dropna() for k, g in val_df.groupby(self.GROUP_KEYS)}
+    def _dof(self, n_train, n_stores, n_prices):
+        return n_train - self._n_params(n_stores, n_prices)
 
-        rows, pred_frames = [], []
-        skipped = 0
-        for key in sorted(set(train_groups) & set(val_groups)):
-            g_train, g_val = train_groups[key], val_groups[key]
-            if len(g_train) < self.min_obs or len(g_val) == 0:
-                skipped += 1
+    def _vif(self, df, price_cols):
+        cont = price_cols + self.control_cols
+        X = np.column_stack([np.ones(len(df)), df[cont].to_numpy(float)])
+        return {f"vif_{c}": float(variance_inflation_factor(X, i + 1))
+                for i, c in enumerate(cont)}
+
+    def run_own(self, train, val):
+        rows = []
+        rhs = "log_price + " + " + ".join(self.control_cols) + " + C(store_code)"
+        for product, g_tr in train.groupby("product_code"):
+            n_stores = g_tr["store_code"].nunique()
+            dof = self._dof(len(g_tr), n_stores, 1)
+            g_va = val[(val.product_code == product)
+                & val.store_code.isin(g_tr.store_code.unique())]
+            if dof < MIN_DOF or g_tr["log_price"].nunique() < 2 or g_va.empty:
                 continue
-            if g_train["log_p_i"].nunique() < 2 or g_train["log_p_j"].nunique() < 2:
-                skipped += 1
-                continue
-            row, preds = self._fit_one(key, g_train, g_val)
-            rows.append(row)
-            if preds is not None:
-                pred_frames.append(preds)
-
-        summary = pd.DataFrame(rows)
-        preds = pd.concat(pred_frames, ignore_index=True) if pred_frames else pd.DataFrame()
-        return summary, preds, skipped
-
-    def _fit_one(self, key, g_train, g_val):
-        store, pair_id, product_i, product_j = key
-        try:
-            fit = smf.ols(self._formula, data=g_train).fit()
-            y_hat = fit.predict(g_val)
-            y = g_val["log_v_i"]
-            resid = y - y_hat
-            ss_tot = np.sum((y - y.mean()) ** 2)
-            summary = {
-                "store_code": store, "pair_id": pair_id,
-                "product_i": product_i, "product_j": product_j,
-                "status": "ok",
-                "n_train": len(g_train), "n_val": len(g_val),
-                "own_elasticity": fit.params.get("log_p_i", np.nan),
-                "cross_elasticity": fit.params.get("log_p_j", np.nan),
-                "mae_val": float(np.mean(np.abs(resid))),
-                "rmse_val": float(np.sqrt(np.mean(resid ** 2))),
-                "r2_val": np.nan if ss_tot == 0 else float(1 - np.sum(resid ** 2) / ss_tot),
-            }
-            preds = pd.DataFrame({
-                "store_code": store, "product_i": product_i, "product_j": product_j,
-                "week_id": g_val["week_id"].values,
-                "y_true_i": y.values, "y_hat_i": y_hat.values,
+            fit = smf.ols(f"log_demand ~ {rhs}", g_tr).fit(cov_type="HC1")
+            resid = g_va["log_demand"] - fit.predict(g_va)
+            rows.append({
+                "product_code": product, "n_train": len(g_tr), "n_stores": n_stores,
+                "own_elasticity": fit.params["log_price"],
+                "own_se": fit.bse["log_price"],
+                **self._vif(g_tr, ["log_price"]),
+                "cond": float(np.linalg.cond(fit.model.exog)),
+                "mae_val": float(resid.abs().mean()),
+                "rmse_val": float(np.sqrt((resid ** 2).mean())),
             })
-            return summary, preds
-        except Exception as exc:
-            return {
-                "store_code": store, "pair_id": pair_id,
-                "product_i": product_i, "product_j": product_j,
-                "status": "error", "error_message": str(exc),
-            }, None
+        return pd.DataFrame(rows)
+
+    def run_cross(self, pairs_train, pairs_val):
+        rhs = "log_p_i + log_p_j + " + " + ".join(self.control_cols) + " + C(store_code)"
+        rows = []
+        for (pi, pj), g_tr in pairs_train.groupby(["product_i", "product_j"]):
+            n_stores = g_tr["store_code"].nunique()
+            dof = self._dof(len(g_tr), n_stores, 2)
+            g_va = pairs_val[
+                (pairs_val.product_i == pi) & (pairs_val.product_j == pj)
+                & pairs_val.store_code.isin(g_tr.store_code.unique())
+            ]
+            if (n_stores < MIN_STORES_CROSS or dof < MIN_DOF
+                    or g_tr["log_p_i"].nunique() < 2 or g_tr["log_p_j"].nunique() < 2
+                    or g_va.empty):
+                continue
+
+            vif = self._vif(g_tr, ["log_p_i", "log_p_j"])
+            if vif["vif_log_p_i"] >= MAX_VIF or vif["vif_log_p_j"] >= MAX_VIF:
+                continue
+
+            fit = smf.ols(f"log_v_i ~ {rhs}", g_tr).fit(cov_type="HC1")
+            resid = g_va["log_v_i"] - fit.predict(g_va)
+            rows.append({
+                "product_i": pi, "product_j": pj, "n_train": len(g_tr), "n_stores": n_stores,
+                "own_elasticity": fit.params["log_p_i"],
+                "cross_elasticity": fit.params["log_p_j"],
+                **vif,
+                "cond": float(np.linalg.cond(fit.model.exog)),
+                "mae_val": float(resid.abs().mean()),
+                "rmse_val": float(np.sqrt((resid ** 2).mean())),
+            })
+        return pd.DataFrame(rows)

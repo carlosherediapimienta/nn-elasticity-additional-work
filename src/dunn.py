@@ -406,9 +406,8 @@ class DunnWeeklyPanelBuilder:
         return weekly
 
     def to_icdn_identifiers(self, weekly: pd.DataFrame) -> pd.DataFrame:
-        """ICDN category = COMMODITY_DESC; brand = Private/National flag.
-
-        WEEK_NO is already sequential. Do not remap.
+        """ICDN category = COMMODITY_DESC; brand = manufacturer id;
+        style = Private/National.
         """
         weekly = weekly.rename(
             columns={
@@ -416,15 +415,17 @@ class DunnWeeklyPanelBuilder:
                 "PRODUCT_ID": "product_code",
                 "WEEK_NO": "week_id",
                 "COMMODITY_DESC": "category",
-                "BRAND": "brand",
+                "BRAND": "style",
                 "SUB_COMMODITY_DESC": "sub_commodity",
                 "CURR_SIZE_OF_PRODUCT": "size",
                 "DEPARTMENT": "department",
-                "MANUFACTURER": "manufacturer",
+                "MANUFACTURER": "brand",
             }
         )
         weekly["store_code"] = weekly["store_code"].astype("string")
         weekly["product_code"] = weekly["product_code"].astype("string")
+        weekly["brand"] = weekly["brand"].astype("string")
+        weekly["style"] = weekly["style"].astype("string")
         weekly["week_id"] = weekly["week_id"].astype("int16")
 
         weeks = np.sort(weekly["week_id"].unique())
@@ -484,7 +485,7 @@ class DunnWeeklyPanelBuilder:
         """
         stats = (
             selection_core.groupby(
-                ["product_code", "category", "sub_commodity", "brand", "department"],
+                ["product_code", "category", "sub_commodity", "brand", "style", "department"],
                 observed=True,
             )
             .agg(
@@ -924,6 +925,7 @@ class DunnWeeklyPanelBuilder:
                 "on_promo",
                 "category",
                 "brand",
+                "style",
             ]
         ].copy()
         icdn["on_promo"] = icdn["on_promo"].astype("int8")
