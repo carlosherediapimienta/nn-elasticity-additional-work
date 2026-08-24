@@ -119,8 +119,8 @@ class OneCSampleSelection:
     candidate_product_codes: list[str]
     product_codes: list[str]
     n_eligible_in_category: int
-    joint_coverage_ge_8_of_10: float | None = None
-    joint_coverage_all_10: float | None = None
+    joint_coverage_ge: float | None = None
+    joint_coverage_all: float | None = None
     criteria: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -132,8 +132,8 @@ class OneCSampleSelection:
             "candidate_product_codes": list(self.candidate_product_codes),
             "product_codes": list(self.product_codes),
             "n_eligible_in_category": int(self.n_eligible_in_category),
-            "joint_coverage_ge_8_of_10": self.joint_coverage_ge_8_of_10,
-            "joint_coverage_all_10": self.joint_coverage_all_10,
+            "joint_coverage_ge": self.joint_coverage_ge,
+            "joint_coverage_all": self.joint_coverage_all,
             "criteria": self.criteria,
         }
 
@@ -670,7 +670,7 @@ class OneCWeeklyPanelBuilder:
     def pairwise_jaccard(presence: pd.DataFrame) -> pd.DataFrame:
         """J(i,j) = |A_i ∩ A_j| / |A_i ∪ A_j| on store-week presence."""
         cols = presence.columns.tolist()
-        x = presence.to_numpy().astype(bool)
+        x = presence.to_numpy(dtype=np.int32)
         inter = x.T @ x
         size = x.sum(axis=0)
         union = size[:, None] + size[None, :] - inter
@@ -755,11 +755,12 @@ class OneCWeeklyPanelBuilder:
         selected_presence = presence[selected]
         joint = selected_presence.sum(axis=1) / len(selected)
         print(joint.describe())
-        ge8 = float((joint >= 0.80).mean())
-        all10 = float((joint == 1.0).mean())
-        print("store-weeks >= 8/10:", ge8)
-        print("store-weeks = 10/10:", all10)
-        print(selected_presence.mean().sort_values())
+        n = len(selected)
+        k80 = int(np.ceil(0.80 * n))
+        ge80 = float((joint >= 0.80).mean())
+        all_n = float((joint == 1.0).mean())
+        print(f"store-weeks >= {k80}/{n}:", ge80)
+        print(f"store-weeks = {n}/{n}:", all_n)
 
         cat_name = str(candidates["category"].iloc[0])
         self.candidates = candidates
@@ -774,8 +775,8 @@ class OneCWeeklyPanelBuilder:
             n_eligible_in_category=int(
                 (self.eligible["item_category_id"] == category_id).sum()
             ),
-            joint_coverage_ge_8_of_10=ge8,
-            joint_coverage_all_10=all10,
+            joint_coverage_ge=ge80,
+            joint_coverage_all=all_n,
             criteria={
                 "selection_frac": self.config.selection_frac,
                 "min_store_week_coverage": self.config.min_store_week_coverage,
@@ -824,6 +825,10 @@ class OneCWeeklyPanelBuilder:
         print("rows dropped without promo reference:", n_no_ref)
         panel = panel[panel["promo_ref_available"]].copy()
         panel["on_promo"] = panel["on_promo"].astype("int8")
+
+        n_bad_price = int((panel["price"] <= 0).sum())
+        print("rows dropped for non-positive price:", n_bad_price)
+        panel = panel[panel["price"] > 0].copy()
 
         icdn = panel[
             [

@@ -737,6 +737,9 @@ class M5WeeklyPanelBuilder:
         print("Zero-sales rows dropped for ICDN:", n_zeros)
 
         panel = panel[panel["units"] > 0].copy()
+        n_bad_price = int((panel["price"] <= 0).sum())
+        print("rows dropped for non-positive price:", n_bad_price)
+        panel = panel[panel["price"] > 0].copy()
         panel = panel.sort_values(
             ["week_id", "store_code", "product_code"]
         ).reset_index(drop=True)

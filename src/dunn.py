@@ -73,6 +73,8 @@ class DunnConfig:
     n_candidate_skus: int = 30
     n_skus: int = 10
     min_promo_coverage: float = 0.90
+    jaccard_weight: float = 0.7
+    coverage_weight: float = 0.3
 
     causal_chunksize: int = 1_000_000
 
@@ -96,8 +98,8 @@ class DunnSampleSelection:
     candidate_product_codes: list[str]
     product_codes: list[str]
     n_eligible_in_group: int
-    joint_coverage_ge_8_of_10: float | None = None
-    joint_coverage_all_10: float | None = None
+    joint_coverage_ge: float | None = None
+    joint_coverage_all: float | None = None
     criteria: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -110,8 +112,8 @@ class DunnSampleSelection:
             "candidate_product_codes": list(self.candidate_product_codes),
             "product_codes": list(self.product_codes),
             "n_eligible_in_group": int(self.n_eligible_in_group),
-            "joint_coverage_ge_8_of_10": self.joint_coverage_ge_8_of_10,
-            "joint_coverage_all_10": self.joint_coverage_all_10,
+            "joint_coverage_ge_8": self.joint_coverage_ge,
+            "joint_coverage_all": self.joint_coverage_all,
             "criteria": self.criteria,
         }
 
@@ -318,6 +320,20 @@ class DunnWeeklyPanelBuilder:
         )
         stats["product_code"] = stats["PRODUCT_ID"].astype("string")
         return stats
+
+    @staticmethod
+    def pairwise_jaccard(presence: pd.DataFrame) -> pd.DataFrame:
+        cols = presence.columns.tolist()
+        x = presence.to_numpy(dtype=np.int32)
+        inter = x.T @ x
+        size = x.sum(axis=0)
+        union = size[:, None] + size[None, :] - inter
+        scores = np.divide(
+            inter, union,
+            out=np.zeros(inter.shape, dtype=float),
+            where=union > 0,
+        )
+        return pd.DataFrame(scores, index=cols, columns=cols)
 
     # ======================================================================
     # Weekly aggregation
@@ -561,7 +577,8 @@ class DunnWeeklyPanelBuilder:
             )
             .reset_index()
         )
-        sub = sub[sub["n_products"] >= cfg.min_products_in_group].sort_values(
+        min_n = max(cfg.min_products_in_group, cfg.n_skus)
+        sub = sub[sub["n_products"] >= min_n].sort_values(
             ["median_coverage", "total_units"], ascending=False
         )
         print("sub-commodities with enough SKUs:")
@@ -712,8 +729,50 @@ class DunnWeeklyPanelBuilder:
         promo_weekly["week_id"] = promo_weekly["WEEK_NO"].astype("int16")
         return promo_weekly
 
+    @staticmethod
+    def pairwise_jaccard(presence: pd.DataFrame) -> pd.DataFrame:
+        cols = presence.columns.tolist()
+        x = presence.to_numpy(dtype=np.int32)
+        inter = x.T @ x
+        size = x.sum(axis=0)
+        union = size[:, None] + size[None, :] - inter
+        scores = np.divide(
+            inter,
+            union,
+            out=np.zeros(inter.shape, dtype=float),
+            where=union > 0,
+        )
+        return pd.DataFrame(scores, index=cols, columns=cols)
+
+    def greedy_select_products(
+        self,
+        candidates: pd.DataFrame,
+        presence: pd.DataFrame,
+    ) -> list[str]:
+        cfg = self.config
+        rank = candidates.set_index("product_code")
+        rank.index = rank.index.astype(str)
+        jaccard = self.pairwise_jaccard(presence)
+        first = str(
+            candidates.sort_values("coverage_rate", ascending=False)
+            .iloc[0]["product_code"]
+        )
+        selected = [first]
+        remaining_pool = [str(p) for p in candidates["product_code"].tolist()]
+        while len(selected) < cfg.n_skus:
+            remaining = [p for p in remaining_pool if p not in selected]
+            if not remaining:
+                break
+            scores = {}
+            for p in remaining:
+                mean_j = float(jaccard.loc[p, selected].mean())
+                cov = float(rank.loc[p, "coverage_rate"])
+                scores[p] = cfg.jaccard_weight * mean_j + cfg.coverage_weight * cov
+            selected.append(max(scores, key=scores.get))
+        return selected
+
     def attach_causal_promo(self) -> pd.DataFrame:
-        """Left-join causal flags. Missing is *not* recoded as on_promo = 0."""
+        """Left-join causal flags. No causal row → not featured → on_promo = 0."""
         if self.weekly is None or self.candidates is None:
             raise RuntimeError("Need transaction master and candidate shortlist.")
 
@@ -739,15 +798,21 @@ class DunnWeeklyPanelBuilder:
             how="left",
             validate="one_to_one",
         )
-        panel["promo_observed"] = panel["on_promo"].notna()
+        panel["promo_observed"] = panel["on_promo"].notna() 
+        panel["on_display"] = panel["on_display"].fillna(0).astype("int8")
+        panel["in_mailer"] = panel["in_mailer"].fillna(0).astype("int8")
+        panel["on_promo"] = panel["on_promo"].fillna(0).astype("int8")
         self.candidate_panel = panel
         return panel
 
-    def measure_promo_coverage(self) -> pd.DataFrame:
+    def measure_promo_coverage(self, *, selection_window: bool = True) -> pd.DataFrame:
         if self.candidate_panel is None:
             raise RuntimeError("Call attach_causal_promo() first.")
+        panel = self.candidate_panel
+        if selection_window:
+            panel = panel[panel["week_id"] <= self.config.selection_cutoff]
         coverage = (
-            self.candidate_panel.groupby("product_code", observed=True)
+            panel.groupby("product_code", observed=True)
             .agg(n_rows=("units", "size"), promo_rows=("promo_observed", "sum"))
             .reset_index()
         )
@@ -764,24 +829,28 @@ class DunnWeeklyPanelBuilder:
         candidates = candidates[
             candidates["promo_coverage"] >= self.config.min_promo_coverage
         ].copy()
-        candidates = candidates.sort_values(
-            [
-                "coverage_rate",
-                "promo_coverage",
-                "n_stores",
-                "n_weeks",
-                "unique_prices",
-                "total_units",
-            ],
-            ascending=False,
-        )
         if len(candidates) < self.config.n_skus:
             print(
                 f"Warning: only {len(candidates)} SKUs reach "
                 f"promo_coverage >= {self.config.min_promo_coverage}."
             )
 
-        selected = candidates.head(self.config.n_skus)["product_code"].astype(str).tolist()
+        window = self.candidate_panel[
+            (self.candidate_panel["week_id"] <= self.config.selection_cutoff)
+            & self.candidate_panel["product_code"].isin(candidates["product_code"])
+        ]
+        presence = (
+            window.assign(observed=1)
+            .pivot_table(
+                index=["store_code", "week_id"],
+                columns="product_code",
+                values="observed",
+                aggfunc="max",
+                fill_value=0,
+            )
+        )
+        presence.columns = presence.columns.astype(str)
+        selected = self.greedy_select_products(candidates, presence)
         print("SELECTED_PRODUCTS:", selected)
 
         self.candidates = candidates
@@ -817,23 +886,21 @@ class DunnWeeklyPanelBuilder:
             return
         joint = presence.sum(axis=1) / len(selected)
         print(joint.describe())
-        ge8 = float((joint >= 0.8).mean())
-        all10 = float((joint == 1).mean())
-        print("store-weeks with >=8/10 products observed:", ge8)
-        print("store-weeks with 10/10 observed:", all10)
-        self.selection.joint_coverage_ge_8_of_10 = ge8
-        self.selection.joint_coverage_all_10 = all10
+        ge = float((joint >= 0.8).mean())
+        all = float((joint == 1).mean())
+        print("store-weeks with >=80% of products observed:", ge)
+        print("store-weeks with all products observed:", all)
+        self.selection.joint_coverage_ge = ge
+        self.selection.joint_coverage_all = all
 
     # ======================================================================
     # ICDN panel
     # ======================================================================
 
     def build_icdn_panel(self) -> pd.DataFrame:
-        """Main spec: keep rows with q > 0, p > 0 and *observed* promo.
+        """Main spec: keep rows with q > 0, p > 0.
 
-        Missing causal is dropped, not filled with on_promo = 0.
-        A robustness copy can recode missing promo as 0 via
-        ``fill_missing_promo_zero``.
+        Missing causal is on_promo = 0 (no mailer/display recorded).
         """
         if self.candidate_panel is None or self.selection is None:
             raise RuntimeError("Need candidate panel and frozen SKUs.")
@@ -841,9 +908,11 @@ class DunnWeeklyPanelBuilder:
         panel = self.candidate_panel[
             self.candidate_panel["product_code"].isin(self.selection.product_codes)
         ].copy()
-        n_missing_promo = int((~panel["promo_observed"]).sum())
-        print("rows dropped for unobserved promo:", n_missing_promo)
-        panel = panel[panel["promo_observed"]].copy()
+        panel["on_promo"] = panel["on_promo"].fillna(0).astype("int8")
+
+        n_bad_price = int((panel["price"] <= 0).sum())
+        print("rows dropped for non-positive price:", n_bad_price)
+        panel = panel[panel["price"] > 0].copy()
 
         icdn = panel[
             [
@@ -904,7 +973,7 @@ class DunnWeeklyPanelBuilder:
 
     @staticmethod
     def fill_missing_promo_zero(panel: pd.DataFrame) -> pd.DataFrame:
-        """Robustness only: recode unobserved causal as on_promo = 0."""
+        """Recode missing causal as on_promo = 0. This is the main Dunnhumby spec."""
         out = panel.copy()
         out["on_promo"] = out["on_promo"].fillna(0).astype("int8")
         return out

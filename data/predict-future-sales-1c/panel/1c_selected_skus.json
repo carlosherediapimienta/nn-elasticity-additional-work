@@ -64,23 +64,13 @@
     "6740",
     "2445",
     "6457",
-    "7070",
     "6738",
-    "3325",
-    "15044",
-    "2252",
-    "15063",
-    "1470",
-    "4779",
-    "2753",
-    "4809",
-    "2929",
-    "2833",
-    "15016"
+    "7070",
+    "3325"
   ],
   "n_eligible_in_category": 38,
-  "joint_coverage_ge_8_of_10": 0.12482662968099861,
-  "joint_coverage_all_10": 0.0027739251040221915,
+  "joint_coverage_ge": 0.3418862690707351,
+  "joint_coverage_all": 0.07142857142857142,
   "criteria": {
     "selection_frac": 0.5,
     "min_store_week_coverage": 0.85,
@@ -91,7 +81,7 @@
     "min_price_cv": 0.03,
     "min_promo_ref_coverage": 0.8,
     "max_return_rate": 0.05,
-    "n_skus": 20,
+    "n_skus": 10,
     "jaccard_weight": 0.7
   }
 }
