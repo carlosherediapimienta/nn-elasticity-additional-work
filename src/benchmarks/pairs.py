@@ -17,4 +17,9 @@ class PairDatasetBuilder:
             columns={"product_code": "product_j", "log_price": "log_p_j"}
         )
         pair_df = left.merge(right, on=["store_code", "week_id"], how="inner")
-        return pair_df[pair_df["product_i"] != pair_df["product_j"]].copy()
+        pair_df = pair_df[pair_df["product_i"] != pair_df["product_j"]].copy()
+
+        a = pair_df["product_i"].astype(str)
+        b = pair_df["product_j"].astype(str)
+        pair_df["pair_id"] = np.where(a < b, a + "__" + b, b + "__" + a)
+        return pair_df
