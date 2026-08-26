@@ -1,4 +1,10 @@
-# src/benchmarks/features.py
+"""ICDN feature builder reused by OLS, Ridge, and the MLP.
+
+Fit on train only. Validation (and bootstrap val) is transformed with the
+train tail so lags/rolling windows do not peek into the future. Shared
+features are store-week; product features are SKU-week.
+"""
+
 from __future__ import annotations
 
 import pandas as pd
@@ -17,10 +23,16 @@ class ICDNFeaturePipeline:
         self._train_tail: pd.DataFrame | None = None
 
     @property
-    def control_cols(self) -> list[str]:
+    def shared_cols(self) -> list[str]:
         if self._builder is None:
             raise RuntimeError("fit() first")
-        return list(self._builder.shared_features) + list(self._builder.product_features)
+        return list(self._builder.shared_features)
+
+    @property
+    def product_cols(self) -> list[str]:
+        if self._builder is None:
+            raise RuntimeError("fit() first")
+        return list(self._builder.product_features)
 
     def fit(self, panel: pd.DataFrame) -> "ICDNFeaturePipeline":
         schema = self.config.schema
@@ -46,10 +58,6 @@ class ICDNFeaturePipeline:
             keep = set(panel[period].unique())
             return out[out[period].isin(keep)].reset_index(drop=True)
         return self._builder.transform(panel)
-
-    def fit_transform(self, panel: pd.DataFrame) -> pd.DataFrame:
-        self.fit(panel)
-        return self._builder.run(panel)
 
     def transform_val(self, val: pd.DataFrame) -> pd.DataFrame:
         return self.transform(val, history=self._train_tail)

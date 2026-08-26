@@ -1,4 +1,14 @@
-# src/benchmarks/demand_mlp.py
+"""Feature-matched multiproduct MLP.
+
+One (store, week) row → J log-demands. Inputs are log prices, shared
+store-week features once, vectorized product features, and a store embedding.
+The observation mask is used only in the loss, metrics, and elasticity filter —
+it is not concatenated into z.
+
+Elasticities are Jacobian entries ∂ log q_i / ∂ log p_j on evaluate(),
+rescaled from standardized prices back to log-log units.
+"""
+
 from __future__ import annotations
 
 import numpy as np
@@ -6,8 +16,12 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+from src.benchmarks.prices import CausalPriceFill
+from src.benchmarks.universe import assert_layout, require_products
+
 
 class _TrainOnlyEncoder:
+    """Integer store ids from train. Unseen stores map to an extra unknown index."""
     def fit(self, values: pd.Series) -> "_TrainOnlyEncoder":
         cats = pd.Index(sorted(values.astype("object").unique()))
         self.categories_ = cats
@@ -27,27 +41,39 @@ def _pivot_slot(df, products, value):
 
 
 class MarketDatasetBuilder:
-    """One row per (store, week): prices, ICDN features, mask, log-demands."""
+    """One row per (store, week): prices, shared feats once, product feats, mask, log-demands."""
 
-    def __init__(self, control_cols: list[str], products: list):
-        self.control_cols = list(control_cols)
+    def __init__(self, shared_cols: list[str], product_cols: list[str], products: list):
+        self.shared_cols = list(shared_cols)
+        self.product_cols = list(product_cols)
         self.products = list(products)
 
     def build(self, df: pd.DataFrame) -> dict:
         keys = ["store_code", "week_id", "product_code"]
-        cols = keys + ["log_demand", "log_price"] + self.control_cols
+        cols = keys + ["log_demand", "log_price"] + self.shared_cols + self.product_cols
         base = df[cols].drop_duplicates(keys).copy()
+        base["product_code"] = base["product_code"].astype(str)
 
         y = _pivot_slot(base, self.products, "log_demand")
         u = _pivot_slot(base, self.products, "log_price")
         mask = y.notna()
         index = y.index
 
-        x_blocks = []
-        for c in self.control_cols:
+        if self.shared_cols:
+            Xs = (
+                base.groupby(["store_code", "week_id"], observed=True)[self.shared_cols]
+                .first()
+                .reindex(index)
+                .to_numpy(dtype=float)
+            )
+        else:
+            Xs = np.zeros((len(index), 0))
+
+        xp_blocks = []
+        for c in self.product_cols:
             block = _pivot_slot(base, self.products, c).reindex(index)
-            x_blocks.append(block.to_numpy(dtype=float))
-        X = np.concatenate(x_blocks, axis=1) if x_blocks else np.zeros((len(index), 0))
+            xp_blocks.append(block.to_numpy(dtype=float))
+        Xp = np.concatenate(xp_blocks, axis=1) if xp_blocks else np.zeros((len(index), 0))
 
         return {
             "store_code": index.get_level_values("store_code").to_numpy(),
@@ -55,20 +81,21 @@ class MarketDatasetBuilder:
             "u": u.reindex(index).to_numpy(dtype=float),
             "y": y.to_numpy(dtype=float),
             "mask": mask.reindex(index).to_numpy(dtype=bool),
-            "X": X,
+            "Xs": Xs,
+            "Xp": Xp,
         }
 
 
 class MultiproductMLP(nn.Module):
-    """Dense MLP: z = [u, vec(X), m, store_emb] → J log-demands."""
+    """Dense MLP: z = [u, X_shared, vec(X_product), store_emb] → J log-demands."""
 
-    def __init__(self, n_products, n_controls, n_stores, hidden=(64, 32),
+    def __init__(self, n_products, n_shared, n_product, n_stores, hidden=(64, 32),
                  act="gelu", dropout=0.0, d_store=8):
         super().__init__()
         self.n_products = n_products
         self.emb_store = nn.Embedding(n_stores, d_store)
         act_fn = {"gelu": nn.GELU, "tanh": nn.Tanh, "relu": nn.ReLU}[act]
-        in_dim = n_products * (2 + n_controls) + d_store
+        in_dim = n_products * (1 + n_product) + n_shared + d_store
         dims = [in_dim] + list(hidden)
         layers = []
         for a, b in zip(dims[:-1], dims[1:]):
@@ -76,17 +103,19 @@ class MultiproductMLP(nn.Module):
         layers.append(nn.Linear(dims[-1], n_products))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, u, X, m, store_idx):
-        z = torch.cat([u, X, m, self.emb_store(store_idx)], dim=-1)
+    def forward(self, u, X, store_idx):
+        z = torch.cat([u, X, self.emb_store(store_idx)], dim=-1)
         return self.net(z)
 
 
 class DemandMLPPipeline:
-    """Feature-matched multiproduct MLP. Elasticities = Jacobian on val."""
+    """Feature-matched multiproduct MLP. Elasticities = Jacobian on evaluate()."""
 
     def __init__(
         self,
-        control_cols: list[str],
+        shared_cols: list[str],
+        product_cols: list[str],
+        products: list[str],
         hidden: tuple = (64, 32),
         act: str = "gelu",
         dropout: float = 0.0,
@@ -100,7 +129,9 @@ class DemandMLPPipeline:
         device: str | None = None,
         seed: int = 42,
     ):
-        self.control_cols = list(control_cols)
+        self.shared_cols = list(shared_cols)
+        self.product_cols = list(product_cols)
+        self.products = [str(p) for p in products]
         self.hidden = hidden
         self.act = act
         self.dropout = dropout
@@ -113,6 +144,7 @@ class DemandMLPPipeline:
         self.d_store = d_store
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.seed = seed
+        self._fitted = False
 
     @staticmethod
     def _masked_moments(arr, mask):
@@ -131,56 +163,85 @@ class DemandMLPPipeline:
         return mu, sd
 
     @staticmethod
-    def _zfill(arr, mu, sd, mask):
+    def _moments(arr):
+        arr = np.asarray(arr, dtype=float)
+        mu = np.nanmean(arr, axis=0)
+        sd = np.nanstd(arr, axis=0)
+        mu = np.where(np.isfinite(mu), mu, 0.0)
+        sd = np.where(np.isfinite(sd) & (sd > 1e-12), sd, 1.0)
+        return mu, sd
+
+    @staticmethod
+    def _zfill(arr, mu, sd, mask=None):
         z = (arr - mu) / sd
-        z = np.where(mask, z, 0.0)
+        if mask is not None:
+            z = np.where(mask, z, 0.0)
         return np.nan_to_num(z, nan=0.0).astype(np.float32)
 
-    def run(self, train_df: pd.DataFrame, val_df: pd.DataFrame):
+    def _u_frame(self, slot):
+        return pd.DataFrame(
+            slot["u"],
+            index=pd.MultiIndex.from_arrays(
+                [slot["store_code"], slot["week_id"]],
+                names=["store_code", "week_id"],
+            ),
+            columns=self.products,
+        )
+
+    def _pack(self, slot, u, X, m):
+        device = self.device
+        return (
+            torch.tensor(u, dtype=torch.float32, device=device),
+            torch.tensor(X, dtype=torch.float32, device=device),
+            torch.tensor(
+                self.store_enc.transform(pd.Series(slot["store_code"])),
+                dtype=torch.long, device=device,
+            ),
+            torch.tensor(np.nan_to_num(slot["y"], nan=0.0), dtype=torch.float32, device=device),
+            torch.tensor(m, dtype=torch.float32, device=device),
+        )
+
+    def _pack_scaled(self, slot, u_raw):
+        u = np.nan_to_num((u_raw - self.u_mu) / self.u_sd, nan=0.0).astype(np.float32)
+        Xs = self._zfill(slot["Xs"], self.xs_mu, self.xs_sd)
+        n_prod = len(self.product_cols)
+        mask_xp = np.tile(slot["mask"], (1, n_prod)) if n_prod else slot["mask"]
+        Xp = self._zfill(slot["Xp"], self.xp_mu, self.xp_sd, mask_xp)
+        X = np.concatenate([Xs, Xp], axis=1) if Xp.shape[1] else Xs
+        m = slot["mask"].astype(np.float32)
+        return self._pack(slot, u, X, m)
+
+    def fit(self, train_df: pd.DataFrame, early_stop_df: pd.DataFrame) -> "DemandMLPPipeline":
+        """Train on `train_df`; pick the checkpoint from `early_stop_df` only."""
         torch.manual_seed(self.seed)
-        products = sorted(train_df["product_code"].astype(str).unique())
-        J = len(products)
-        builder = MarketDatasetBuilder(self.control_cols, products)
-        tr = builder.build(train_df)
-        va = builder.build(val_df)
+        train_df = require_products(train_df, self.products, "mlp train")
+        early_stop_df = require_products(early_stop_df, self.products, "mlp early_stop")
+        J = len(self.products)
+        self.builder = MarketDatasetBuilder(self.shared_cols, self.product_cols, self.products)
+        tr = self.builder.build(train_df)
+        es = self.builder.build(early_stop_df)
 
-        store_enc = _TrainOnlyEncoder().fit(pd.Series(tr["store_code"]))
-        n_ctrl = len(self.control_cols)
-        mask_x_tr = np.tile(tr["mask"], (1, n_ctrl)) if n_ctrl else tr["mask"]
-        mask_x_va = np.tile(va["mask"], (1, n_ctrl)) if n_ctrl else va["mask"]
+        self.store_enc = _TrainOnlyEncoder().fit(pd.Series(tr["store_code"]))
+        self.n_shared = len(self.shared_cols)
+        self.n_product = len(self.product_cols)
 
-        u_mu, u_sd = self._masked_moments(tr["u"], tr["mask"])
-        x_mu, x_sd = self._masked_moments(tr["X"], mask_x_tr)
+        self.price_fill = CausalPriceFill().fit(
+            pd.concat([train_df, early_stop_df], ignore_index=True)
+        )
+        self.u_mu, self.u_sd = self._masked_moments(tr["u"], np.isfinite(tr["u"]))
+        self.xs_mu, self.xs_sd = self._moments(tr["Xs"])
+        mask_xp = np.tile(tr["mask"], (1, self.n_product)) if self.n_product else tr["mask"]
+        self.xp_mu, self.xp_sd = self._masked_moments(tr["Xp"], mask_xp)
 
-        u_tr = self._zfill(tr["u"], u_mu, u_sd, tr["mask"])
-        u_va = self._zfill(va["u"], u_mu, u_sd, va["mask"])
-        X_tr = self._zfill(tr["X"], x_mu, x_sd, mask_x_tr)
-        X_va = self._zfill(va["X"], x_mu, x_sd, mask_x_va)
-        m_tr = tr["mask"].astype(np.float32)
-        m_va = va["mask"].astype(np.float32)
-        y_tr, y_va = tr["y"], va["y"]
+        u_tr = self.price_fill.fill_wide(self._u_frame(tr)).to_numpy(dtype=float)
+        u_es = self.price_fill.fill_wide(self._u_frame(es)).to_numpy(dtype=float)
+        Utr, Xtr, Str, Ytr, Wtr = self._pack_scaled(tr, u_tr)
+        Ues, Xes, Ses, Yes, Wes = self._pack_scaled(es, u_es)
 
         device = self.device
-
-        def pack(u, X, m, stores, y, mask):
-            return (
-                torch.tensor(u, dtype=torch.float32, device=device),
-                torch.tensor(X, dtype=torch.float32, device=device),
-                torch.tensor(m, dtype=torch.float32, device=device),
-                torch.tensor(store_enc.transform(pd.Series(stores)), dtype=torch.long, device=device),
-                torch.tensor(np.nan_to_num(y, nan=0.0), dtype=torch.float32, device=device),
-                torch.tensor(mask, dtype=torch.float32, device=device),
-            )
-
-        Utr, Xtr, Mtr, Str, Ytr, Wtr = pack(
-            u_tr, X_tr, m_tr, tr["store_code"], y_tr, m_tr
-        )
-        Uva, Xva, Mva, Sva, Yva, Wva = pack(
-            u_va, X_va, m_va, va["store_code"], y_va, m_va
-        )
-
         model = MultiproductMLP(
-            n_products=J, n_controls=n_ctrl, n_stores=store_enc.n_categories,
+            n_products=J, n_shared=self.n_shared, n_product=self.n_product,
+            n_stores=self.store_enc.n_categories,
             hidden=self.hidden, act=self.act, dropout=self.dropout,
             d_store=self.d_store,
         ).to(device)
@@ -200,7 +261,7 @@ class DemandMLPPipeline:
             for start in range(0, n_train, self.batch_size):
                 idx = perm[start:start + self.batch_size]
                 opt.zero_grad()
-                y_hat = model(Utr[idx], Xtr[idx], Mtr[idx], Str[idx])
+                y_hat = model(Utr[idx], Xtr[idx], Str[idx])
                 loss = masked_loss(y_hat, Ytr[idx], Wtr[idx])
                 loss.backward()
                 opt.step()
@@ -210,12 +271,12 @@ class DemandMLPPipeline:
 
             model.eval()
             with torch.no_grad():
-                val_loss = float(masked_loss(model(Uva, Xva, Mva, Sva), Yva, Wva).item())
+                es_loss = float(masked_loss(model(Ues, Xes, Ses), Yes, Wes).item())
             if epoch == 1 or epoch % 10 == 0:
-                print(f"epoch {epoch:03d}  train_loss={train_loss:.4f}  val_loss={val_loss:.4f}")
+                print(f"epoch {epoch:03d}  train_loss={train_loss:.4f}  es_loss={es_loss:.4f}")
 
-            if val_loss < best_val:
-                best_val, patience = val_loss, 0
+            if es_loss < best_val:
+                best_val, patience = es_loss, 0
                 best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             else:
                 patience += 1
@@ -226,28 +287,46 @@ class DemandMLPPipeline:
         if best_state is not None:
             model.load_state_dict(best_state)
         model.eval()
-        with torch.no_grad():
-            y_hat_val = model(Uva, Xva, Mva, Sva)
+        self.model = model
+        self.best_es_loss = best_val
+        self._fitted = True
+        assert_layout(self.builder.products, self.products, "mlp")
+        assert model.n_products == J
+        return self
 
-        resid = (Yva - y_hat_val).detach().cpu().numpy()
-        w = Wva.detach().cpu().numpy() > 0
+    def evaluate(self, df: pd.DataFrame):
+        """MAE/RMSE/R² on observed cells, Jacobian elasticities, and cell predictions."""
+        if not self._fitted:
+            raise RuntimeError("fit() first")
+        df = require_products(df, self.products, "mlp evaluate")
+        slot = self.builder.build(df)
+        u_raw = self.price_fill.fill_wide(self._u_frame(slot)).to_numpy(dtype=float)
+        U, X, S, Y, W = self._pack_scaled(slot, u_raw)
+        model = self.model
+        model.eval()
+        with torch.no_grad():
+            y_hat_val = model(U, X, S)
+        resid = (Y - y_hat_val).detach().cpu().numpy()
+        w = W.detach().cpu().numpy() > 0
         r = resid[w]
-        ynp = Yva.detach().cpu().numpy()[w]
+        ynp = Y.detach().cpu().numpy()[w]
         ss_tot = float(np.sum((ynp - ynp.mean()) ** 2)) if ynp.size else 0.0
         metrics = {
             "mae_val": float(np.mean(np.abs(r))) if r.size else np.nan,
             "rmse_val": float(np.sqrt(np.mean(r ** 2))) if r.size else np.nan,
             "r2_val": np.nan if ss_tot == 0 else float(1 - np.sum(r ** 2) / ss_tot),
-            "best_val_loss": best_val,
+            "best_es_loss": self.best_es_loss,
+            "n_cells": int(r.size),
         }
-
-        u_grad = Uva.clone().requires_grad_(True)
-        y_hat = model(u_grad, Xva, Mva, Sva)
+        u_grad = U.clone().requires_grad_(True)
+        y_hat = model(u_grad, X, S)
         rows = []
-        u_sd_t = torch.tensor(u_sd, dtype=torch.float32, device=device)
+        u_sd_t = torch.tensor(self.u_sd, dtype=torch.float32, device=self.device)
         y_np = y_hat.detach().cpu().numpy()
-        y_true = va["y"]
-        mask_np = va["mask"]
+        y_true = slot["y"]
+        mask_np = slot["mask"]
+        products = self.products
+        J = len(products)
         for i in range(J):
             grad_i, = torch.autograd.grad(
                 y_hat[:, i].sum(), u_grad, retain_graph=True
@@ -260,8 +339,8 @@ class DemandMLPPipeline:
                     if not mask_np[b, j]:
                         continue
                     rows.append({
-                        "store_code": va["store_code"][b],
-                        "week_id": va["week_id"][b],
+                        "store_code": slot["store_code"][b],
+                        "week_id": slot["week_id"][b],
                         "product_i": products[i],
                         "product_j": products[j],
                         "own_elasticity": e_i[b, i] if i == j else np.nan,
@@ -271,5 +350,13 @@ class DemandMLPPipeline:
                         "y_true_i": y_true[b, i],
                         "y_hat_i": y_np[b, i],
                     })
-        elasticities = pd.DataFrame(rows)
-        return metrics, elasticities
+        y_hat_np = y_hat_val.detach().cpu().numpy()
+        b_idx, i_idx = np.where(mask_np)
+        cells = pd.DataFrame({
+            "store_code": slot["store_code"][b_idx],
+            "product_code": np.asarray(products)[i_idx],
+            "week_id": slot["week_id"][b_idx],
+            "y_true": y_true[b_idx, i_idx],
+            "y_pred": y_hat_np[b_idx, i_idx],
+        })
+        return metrics, pd.DataFrame(rows), cells

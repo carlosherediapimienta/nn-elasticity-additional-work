@@ -1,5 +1,9 @@
-# src/benchmarks/pairs.py
-import numpy as np
+"""Directed (i, j) rows for pairwise log-log equations.
+
+For each (store, week) we emit one row per ordered pair i ≠ j with log demand
+of i, log prices of i and j, and the shared controls.
+"""
+
 import pandas as pd
 
 
@@ -8,6 +12,7 @@ class PairDatasetBuilder:
         self.control_cols = control_cols
 
     def build(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Cartesian i≠j merge on (store, week), carrying i's demand and both log prices."""
         keys = ["store_code", "week_id", "product_code"]
         base = df[keys + ["log_demand", "log_price"] + self.control_cols].copy()
         left = base.rename(columns={
@@ -17,9 +22,4 @@ class PairDatasetBuilder:
             columns={"product_code": "product_j", "log_price": "log_p_j"}
         )
         pair_df = left.merge(right, on=["store_code", "week_id"], how="inner")
-        pair_df = pair_df[pair_df["product_i"] != pair_df["product_j"]].copy()
-
-        a = pair_df["product_i"].astype(str)
-        b = pair_df["product_j"].astype(str)
-        pair_df["pair_id"] = np.where(a < b, a + "__" + b, b + "__" + a)
-        return pair_df
+        return pair_df[pair_df["product_i"] != pair_df["product_j"]].copy()
