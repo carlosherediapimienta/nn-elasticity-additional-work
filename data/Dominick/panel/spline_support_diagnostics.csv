@@ -1,0 +1,6 @@
+dataset,model,fold_or_boot_id,n_observed_cells,n_below_support,n_above_support,share_outside_support
+dominick,icdn,1,21723,977,2793,0.1735487731897067
+dominick,icdn,2,21562,98,4212,0.1998886930711436
+dominick,icdn,holdout,17215,41,3891,0.2284054603543421
+dominick,icdn,boot0,17215,38,4057,0.2378739471391228
+dominick,icdn,boot1,17215,40,4057,0.23799012489108337

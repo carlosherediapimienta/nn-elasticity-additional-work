@@ -1,0 +1,6 @@
+dataset,model,fold_or_boot_id,n_observed_cells,n_below_support,n_above_support,share_outside_support
+walmart,icdn,1,12042,1282,1653,0.2437302773625643
+walmart,icdn,2,10740,811,3680,0.4181564245810056
+walmart,icdn,holdout,8453,632,2923,0.4205607476635514
+walmart,icdn,boot0,8453,293,1897,0.2590796167041287
+walmart,icdn,boot1,8453,639,1184,0.2156630781970898

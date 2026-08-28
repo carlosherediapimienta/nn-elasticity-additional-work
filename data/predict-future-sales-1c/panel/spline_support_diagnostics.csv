@@ -1,0 +1,6 @@
+dataset,model,fold_or_boot_id,n_observed_cells,n_below_support,n_above_support,share_outside_support
+one_c,icdn,1,2595,437,0,0.1684007707129094
+one_c,icdn,2,1285,498,162,0.5136186770428015
+one_c,icdn,holdout,903,142,160,0.3344407530454042
+one_c,icdn,boot0,903,129,160,0.3200442967884828
+one_c,icdn,boot1,903,143,160,0.33554817275747506

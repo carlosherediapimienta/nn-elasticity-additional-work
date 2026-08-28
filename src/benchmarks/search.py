@@ -25,7 +25,7 @@ def dump_best(study, out_dir: Path, hidden_choices: dict = HIDDEN_CHOICES):
     study.trials_dataframe().to_csv(out_dir / "optuna_trials.csv", index=False)
     print("  best MAE", study.best_value)
     print("  best params", best)
-    print("  wrote", out_dir / "best_params.json")
+    #print("  wrote", out_dir / "best_params.json")
     best["hidden"] = tuple(best["hidden"])
     return best, study
 

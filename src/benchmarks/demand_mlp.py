@@ -16,8 +16,13 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+from src.benchmarks.constants import MLP_MAX_EPOCHS, MLP_PATIENCE
 from src.benchmarks.prices import CausalPriceFill
-from src.benchmarks.universe import assert_layout, require_products
+from src.benchmarks.universe import (
+    allow_missing_validation_products,
+    assert_layout,
+    require_training_products,
+)
 
 
 class _TrainOnlyEncoder:
@@ -122,8 +127,8 @@ class DemandMLPPipeline:
         lr: float = 1e-3,
         weight_decay: float = 1e-5,
         batch_size: int = 256,
-        n_epochs: int = 200,
-        es_patience: int = 25,
+        n_epochs: int = MLP_MAX_EPOCHS,
+        es_patience: int = MLP_PATIENCE,
         huber_delta: float = 1.0,
         d_store: int = 16,
         device: str | None = None,
@@ -212,10 +217,14 @@ class DemandMLPPipeline:
         return self._pack(slot, u, X, m)
 
     def fit(self, train_df: pd.DataFrame, early_stop_df: pd.DataFrame) -> "DemandMLPPipeline":
-        """Train on `train_df`; pick the checkpoint from `early_stop_df` only."""
+        """Train on `train_df`; pick the checkpoint from `early_stop_df` only.
+
+        Price fill for training and early stopping is fit on `train_df`.
+        `evaluate()` uses a fill updated with `early_stop_df` as well.
+        """
         torch.manual_seed(self.seed)
-        train_df = require_products(train_df, self.products, "mlp train")
-        early_stop_df = require_products(early_stop_df, self.products, "mlp early_stop")
+        train_df = require_training_products(train_df, self.products, "mlp train")
+        early_stop_df = allow_missing_validation_products(early_stop_df, self.products)
         J = len(self.products)
         self.builder = MarketDatasetBuilder(self.shared_cols, self.product_cols, self.products)
         tr = self.builder.build(train_df)
@@ -225,7 +234,8 @@ class DemandMLPPipeline:
         self.n_shared = len(self.shared_cols)
         self.n_product = len(self.product_cols)
 
-        self.price_fill = CausalPriceFill().fit(
+        self.price_fill = CausalPriceFill().fit(train_df)
+        self.price_fill_infer = CausalPriceFill().fit(
             pd.concat([train_df, early_stop_df], ignore_index=True)
         )
         self.u_mu, self.u_sd = self._masked_moments(tr["u"], np.isfinite(tr["u"]))
@@ -233,8 +243,8 @@ class DemandMLPPipeline:
         mask_xp = np.tile(tr["mask"], (1, self.n_product)) if self.n_product else tr["mask"]
         self.xp_mu, self.xp_sd = self._masked_moments(tr["Xp"], mask_xp)
 
-        u_tr = self.price_fill.fill_wide(self._u_frame(tr)).to_numpy(dtype=float)
-        u_es = self.price_fill.fill_wide(self._u_frame(es)).to_numpy(dtype=float)
+        u_tr = self.price_fill.fill_wide(self._u_frame(tr), panel=train_df).to_numpy(dtype=float)
+        u_es = self.price_fill.fill_wide(self._u_frame(es), panel=early_stop_df).to_numpy(dtype=float)
         Utr, Xtr, Str, Ytr, Wtr = self._pack_scaled(tr, u_tr)
         Ues, Xes, Ses, Yes, Wes = self._pack_scaled(es, u_es)
 
@@ -298,9 +308,9 @@ class DemandMLPPipeline:
         """MAE/RMSE/R² on observed cells, Jacobian elasticities, and cell predictions."""
         if not self._fitted:
             raise RuntimeError("fit() first")
-        df = require_products(df, self.products, "mlp evaluate")
+        df = allow_missing_validation_products(df, self.products)
         slot = self.builder.build(df)
-        u_raw = self.price_fill.fill_wide(self._u_frame(slot)).to_numpy(dtype=float)
+        u_raw = self.price_fill_infer.fill_wide(self._u_frame(slot), panel=df).to_numpy(dtype=float)
         U, X, S, Y, W = self._pack_scaled(slot, u_raw)
         model = self.model
         model.eval()
@@ -347,6 +357,8 @@ class DemandMLPPipeline:
                         "cross_elasticity": e_i[b, j] if i != j else np.nan,
                         "elasticity": e_i[b, j],
                         "kind": "own" if i == j else "cross",
+                        "observed_i": True,
+                        "observed_j": True,
                         "y_true_i": y_true[b, i],
                         "y_hat_i": y_np[b, i],
                     })
