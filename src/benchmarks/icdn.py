@@ -28,6 +28,7 @@ from src.benchmarks.constants import (
     PERIOD_COL,
     PRUNER_STARTUP_ICDN,
     SEED,
+    MLP_MAX_EPOCHS,
 )
 from src.benchmarks.bootstrap import BLOCK_ID_COL, BootstrapError, BootstrapPlan, save_bootstrap_manifest
 from src.benchmarks.features import frozen_calendar, patch_feature_builder_two_clocks
@@ -146,8 +147,8 @@ class ICDNExperiment:
             lambda_elast=searched["lambda_elast"],
             n_knots=int(searched["n_knots"]),
             enforce_negative_beta=True,
-            warmup_epochs=25,
-            epochs=50,
+            warmup_epochs=MLP_MAX_EPOCHS,
+            epochs=MLP_MAX_EPOCHS,
             early_stopping_patience=12,
             seed=SEED,
             verbose=verbose,
