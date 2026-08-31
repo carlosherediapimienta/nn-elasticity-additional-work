@@ -94,10 +94,15 @@ def model_datasets(root: Path, model: str, extras: dict | None = None) -> dict:
             "out": root / "data" / "M5-walmart" / "panel" / model,
             "schema": PanelSchema(category="category"),
         },
-        "one_c": {
-            "path": root / "data" / "predict-future-sales-1c" / "panel" / "1c_icdn_panel.parquet",
-            "out": root / "data" / "predict-future-sales-1c" / "panel" / model,
-            "schema": PanelSchema(category="category"),
+        "dunnhumby": {
+            "path": root / "data" / "Dunnhumby" / "panel" / "dunnhumby_icdn_panel.parquet",
+            "out": root / "data" / "Dunnhumby" / "panel" / model,
+            "schema": PanelSchema(
+                category="category",
+                brand="brand",
+                style="style",
+                size="size",
+            ),
         },
         "dominick": {
             "path": root / "data" / "Dominick" / "panel" / "dominick_icdn_panel.parquet",

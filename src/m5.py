@@ -645,7 +645,7 @@ class M5WeeklyPanelBuilder:
 
         cfg = self.config
         weeks = np.sort(self.master["week_id"].unique())
-        cutoff = int(weeks[int(len(weeks) * cfg.selection_frac)])
+        cutoff = int(weeks[int(len(weeks) * cfg.selection_frac) - 1])
         selection_sample = self.master[
             self.master["week_id"] <= cutoff
         ].copy()

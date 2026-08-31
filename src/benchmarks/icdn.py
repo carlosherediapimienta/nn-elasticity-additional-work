@@ -89,10 +89,10 @@ ICDN_EXTRAS = {
         "beta_prior": -2.0,
         "same_category_first": True,
     },
-    "one_c": {
-        "own_elasticity_bounds": (-3.0, 0.0),
-        "cross_elasticity_bounds": (-0.2, 0.5),
-        "beta_prior": -1.5,
+    "dunnhumby": {
+        "own_elasticity_bounds": (-5.0, 0.0),
+        "cross_elasticity_bounds": (-1.0, 1.0),
+        "beta_prior": -2.0,
         "same_category_first": True,
     },
     "dominick": {
