@@ -15,14 +15,12 @@ PERIOD_COL = "week_id"
 # the panel and the MLP/ICDN nested-fit requirement (every frozen SKU in the
 # shortest inner train). All four models share that common start via
 # split_plan.json; they do not choose their own outer cuts.
-#N_FOLDS = 3
-N_FOLDS = 1
+N_FOLDS = 3
 MIN_TRAIN_FRAC = 0.5
 
 # Inner expanding window for MLP/ICDN Optuna and Ridge α. Outer val is never
 # seen during search.
-#N_INNER_FOLDS = 3
-N_INNER_FOLDS = 1
+N_INNER_FOLDS = 3
 MIN_INNER_FRAC = 0.5
 
 # Last 20% of an outer (or inner) train slice is held out for MLP early stopping.
@@ -55,22 +53,17 @@ HIDDEN_CHOICES = {
 }
 
 # Replicate counts. Linear models are cheap; ICDN is not, so it uses fewer boots.
-# N_BOOT_LINEAR = 100
-# N_BOOT_MLP = 100
-# N_BOOT_ICDN = 100
-N_BOOT_LINEAR = 1
-N_BOOT_MLP = 1
-N_BOOT_ICDN = 1
+N_BOOT_LINEAR = 100
+N_BOOT_MLP = 100
+N_BOOT_ICDN = 100
 
 # MLP train budget. Optuna trials, outer folds, holdout, and bootstrap share these.
 MLP_MAX_EPOCHS = 250
 MLP_PATIENCE = 15
 
 # Optuna budgets. MLP is currently a smoke search (1 trial); ICDN is 15.
-# N_TRIALS_MLP = 100  
-# N_TRIALS_ICDN = 100
-N_TRIALS_MLP = 1  
-N_TRIALS_ICDN = 1
+N_TRIALS_MLP = 100  
+N_TRIALS_ICDN = 100
 
 # MedianPruner startup trials: MLP waits longer before pruning than ICDN.
 PRUNER_STARTUP_MLP = 5

@@ -1,1 +1,4 @@
 dataset,model,fold_or_boot_id,n_observed_cells,n_below_support,n_above_support,share_outside_support
+dunnhumby,icdn,1,55983,3626,11963,0.2784595323580373
+dunnhumby,icdn,holdout,21059,793,6831,0.3620304857780521
+dunnhumby,icdn,boot0,21059,763,5918,0.31725153141174794
