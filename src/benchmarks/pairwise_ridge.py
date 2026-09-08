@@ -13,20 +13,16 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from scipy.stats import f
 from icdn.data.splits import TemporalSplitter
 
-from src.benchmarks.constants import MIN_DOF, MIN_INNER_FRAC, N_INNER_FOLDS, PERIOD_COL
-from src.benchmarks.pairwise import PairwiseLinear
+from src.benchmarks.constants import MIN_INNER_FRAC, N_INNER_FOLDS, PERIOD_COL
+from src.benchmarks.pairwise import PairwiseLinear, equation_key
 
 ALPHAS = (0.1, 1.0, 10.0, 30.0, 100.0, 300.0)
 
-
-def equation_key(store, product_i, product_j) -> tuple[str, str, str]:
-    return str(store), str(product_i), str(product_j)
-
-
 def freeze_alphas(cross: pd.DataFrame) -> dict[tuple[str, str, str], float]:
-    """Map (store, i, j) → α from a holdout `run_cross` table.
+    """Map (store, i, j) -> alpha from a holdout `run_cross` table.
 
     An empty dict means nothing was selected, so bootstrap must not re-search.
     """
@@ -37,56 +33,66 @@ def freeze_alphas(cross: pd.DataFrame) -> dict[tuple[str, str, str], float]:
         for r in cross.itertuples(index=False)
     }
 
-
 class PairwiseRidge(PairwiseLinear):
-    def __init__(self, control_cols=None, alphas=ALPHAS):
+    def __init__(self, control_cols: list[str] = None, alphas=ALPHAS):
         super().__init__(control_cols)
         self.alphas = np.asarray(alphas)
-
-    def _design(self, df, price_cols, ctrl_cols):
+    
+    def _design(self, df: pd.DataFrame, price_cols: list[str], ctrl_cols: list[str]) -> np.ndarray:
         X_price = df[price_cols].to_numpy(float)
         if ctrl_cols:
             X_ctrl = df[ctrl_cols].to_numpy(float)
         else:
             X_ctrl = np.zeros((len(df), 0))
         return X_price, X_ctrl
-
+    
     @staticmethod
-    def _moments(X):
+    def _moments(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         mu = X.mean(axis=0)
         sd = X.std(axis=0, ddof=0)
         sd = np.where(sd < 1e-12, 1.0, sd)
         return mu, sd
-
+    
     @staticmethod
-    def _z(X, mu, sd):
+    def _z(X: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
         return (X - mu) / sd
-
+    
     @staticmethod
-    def _unscale(beta_z, mu, sd):
+    def _unscale(beta_z: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
         b = beta_z[1:] / sd
         a = beta_z[0] - np.dot(beta_z[1:], mu / sd)
         return np.concatenate([[a], b])
-
+    
     @staticmethod
-    def _fit_penalized(y, X_price, X_ctrl, alpha):
+    def _fit_penalized(
+        y: np.ndarray,
+        X_price: np.ndarray,
+        X_ctrl: np.ndarray,
+        alpha: float,
+    ) -> np.ndarray:
         X = np.column_stack([np.ones(len(y)), X_price, X_ctrl])
         d = [1e-8] + [alpha] * (X_price.shape[1] + X_ctrl.shape[1])
         D = np.diag(d)
         return np.linalg.solve(X.T @ X + D, X.T @ y)
 
     def _expanding_inner(self, g_tr: pd.DataFrame) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
-        n_periods = int(g_tr[PERIOD_COL].nunique())
-        min_train = max(1, int(n_periods * MIN_INNER_FRAC))
-        n_folds = min(int(N_INNER_FOLDS), n_periods - min_train)
+        n_peridos = int(g_tr[PERIOD_COL].nunique())
+        min_train = max(1, int(n_peridos * MIN_INNER_FRAC))
+        n_folds = min(int(N_INNER_FOLDS), n_peridos - min_train)
         if n_folds < 1:
             return []
         return TemporalSplitter(period_col=PERIOD_COL).expanding_splits(
             g_tr, n_folds=n_folds, min_train_frac=MIN_INNER_FRAC
         )
 
-    def _cv_alpha(self, g_tr, price_cols, y_col, ctrl_cols):
-        """α* = argmin_α mean_k MAE_logq,k on expanding inner folds."""
+    def _cv_alpha(
+        self,
+        g_tr: pd.DataFrame,
+        price_cols: list[str],
+        y_col: str,
+        ctrl_cols: list[str],
+    ) -> float:
+        """ alpha* = argmin_alpha mean_fold MAE(log q,k) over expanding inner CV. """
         try:
             folds = self._expanding_inner(g_tr)
         except ValueError:
@@ -106,14 +112,22 @@ class PairwiseRidge(PairwiseLinear):
                 Z_tr = self._z(X_tr, mu, sd)
                 Z_va = self._z(X_va, mu, sd)
                 y_tr = inner_tr[y_col].to_numpy(float)
-                y_va = inner_va[y_col].to_numpy(float)
+                y_val = inner_va[y_col].to_numpy(float)
                 beta_z = self._fit_penalized(y_tr, Z_tr[:, :n_p], Z_tr[:, n_p:], alpha)
                 pred = np.column_stack([np.ones(len(inner_va)), Z_va]) @ beta_z
-                maes.append(float(np.mean(np.abs(y_va - pred))))
-            mean_maes.append(float(np.mean(maes)))
-        return float(self.alphas[int(np.argmin(mean_maes))])
+                maes.append(float(np.mean(np.abs(y_val - pred))))
+            mean_maes.append(np.mean(maes))
+        return float(self.alphas[np.argmin(mean_maes)])
 
-    def _run(self, g_tr, g_va, price_cols, y_col, ctrl_cols, alpha=None):
+    def _run(
+        self,
+        g_tr: pd.DataFrame,
+        g_va: pd.DataFrame,
+        price_cols: list[str],
+        y_col: str,
+        ctrl_cols: list[str],
+        alpha=None,
+        ) -> tuple[pd.DataFrame, pd.DataFrame]:
         g_tr = g_tr.sort_values(PERIOD_COL)
         g_va = g_va.sort_values(PERIOD_COL)
         X_price, X_ctrl = self._design(g_tr, price_cols, ctrl_cols)
@@ -134,46 +148,20 @@ class PairwiseRidge(PairwiseLinear):
         y_hat = X_va @ beta
         return beta, float(alpha), y_true, y_hat
 
-    def run_cross(self, pairs_train, pairs_val, selected_alphas=None):
-        """Same (store, i, j) filter as OLS; α from expanding MAE CV or a frozen map."""
-        rows, preds = [], []
-        keys = ["store_code", "product_i", "product_j"]
-        for (store, pi, pj), g_tr in pairs_train.groupby(keys):
-            if selected_alphas is not None:
-                alpha_star = selected_alphas.get(equation_key(store, pi, pj))
-                if alpha_star is None:
-                    continue
-            else:
-                alpha_star = None
-            ctrl_cols = self._varying(g_tr, self.control_cols)
-            dof = self._dof(len(g_tr), 2 + len(ctrl_cols))
-            g_va = pairs_val[
-                (pairs_val.store_code == store)
-                & (pairs_val.product_i == pi)
-                & (pairs_val.product_j == pj)
-            ]
-            if (dof < MIN_DOF
-                    or g_tr["log_p_i"].nunique() < 2 or g_tr["log_p_j"].nunique() < 2
-                    or g_tr["log_v_i"].nunique() < 2 or g_va.empty):
-                continue
-
-            vif = self._vif(g_tr, ["log_p_i", "log_p_j"])
-            if not self._cross_vif_ok(vif):
-                continue
-
-            beta, alpha, y_true, y_hat = self._run(
-                g_tr, g_va, ["log_p_i", "log_p_j"], "log_v_i", ctrl_cols, alpha=alpha_star
-            )
-            preds.append(self._pred_frame(
-                store, pi, pj, g_va["week_id"].to_numpy(), y_true, y_hat,
-            ))
-            rows.append({
-                "store_code": store, "product_i": pi, "product_j": pj,
-                "n_train": len(g_tr), "alpha_selected": alpha,
-                "own_elasticity": float(beta[1]),
-                "cross_elasticity": float(beta[2]),
-                **vif,
-                "n_val": len(g_va),
-                "n_params": 1 + 2 + len(ctrl_cols),
-            })
-        return pd.DataFrame(rows), self._concat(preds)
+    def _estimate_pair(
+        self,
+        g_tr: pd.DataFrame,
+        g_va: pd.DataFrame,
+        ctrl_cols: list[str],
+        alpha=None,
+    ) -> dict:
+        beta, alpha, y_true, y_hat = self._run(
+            g_tr, g_va, ["log_p_i", "log_p_j"], "log_v_i", ctrl_cols, alpha=alpha
+        )
+        return {
+            "own_elasticity": float(beta[1]),
+            "cross_elasticity": float(beta[2]),
+            "y_true": y_true,
+            "y_hat": y_hat,
+            "extra": {"alpha_selected": alpha},
+        }

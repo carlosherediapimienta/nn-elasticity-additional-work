@@ -124,6 +124,7 @@ def patch_feature_builder_two_clocks() -> None:
     def _join_calendar_feature(self, df, grid, col, miss):
         period = self.schema.period
         names = [n for n in list(grid.index.names) if n is not None] + [period]
+        grid = grid.dropna(axis=1, how="all")
         stacked = (
             grid.stack(future_stack=True)
             .rename(col)

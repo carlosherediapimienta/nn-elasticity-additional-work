@@ -20,7 +20,6 @@ from src.benchmarks.constants import (
     SEED,
     SHORT,
 )
-from src.benchmarks.pairs import PairDatasetBuilder
 from src.benchmarks.pairwise_ols import PairwiseOLS
 from src.benchmarks.pairwise_ridge import PairwiseRidge, freeze_alphas
 from src.benchmarks.predict import (
@@ -76,13 +75,11 @@ class PairwiseExperiment:
 
     def fit(self, train, val, selected_alphas=None):
         """Pairwise cross equations → own/cross elasticities, cell ŷ, MAE, parameter count."""
-        builder = PairDatasetBuilder(self.controls)
         est = self.estimator_cls(self.controls)
-        train_pairs, val_pairs = builder.build(train), builder.build(val)
         if selected_alphas is None:
-            cross, pred_ij = est.run_cross(train_pairs, val_pairs)
+            cross, pred_ij = est.run_cross(train, val)
         else:
-            cross, pred_ij = est.run_cross(train_pairs, val_pairs, selected_alphas=selected_alphas)
+            cross, pred_ij = est.run_cross(train, val, selected_alphas=selected_alphas)
         n_parameters = int(cross["n_params"].sum()) if len(cross) else 0
         own, cross = pair_elasticities(cross)
         cells = pairwise_to_cells(pred_ij)
