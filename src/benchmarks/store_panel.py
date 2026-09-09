@@ -1,4 +1,8 @@
-"""Compact store x week x SKU arrays for lazy pairwise equations."""
+"""Compact store × week × SKU arrays for lazy pairwise equations.
+
+OLS/Ridge never materialize the full directed-pair long table. Each store is
+a 2-D grid so equation (i, j) is a column slice of log demand and prices.
+"""
 
 from __future__ import annotations
 

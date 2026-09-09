@@ -315,6 +315,7 @@ class DunnhumbyPanelBuilder:
 
     @staticmethod
     def _parse_spanish_date(value: str) -> pd.Timestamp:
+        """Parse WEEK_END_DATE strings such as ``14-ene-09`` (Spanish month abbr.)."""
         day, month_abbr, year = value.split("-")
         year_i = int(year)
         year_i += 2000 if year_i < 100 else 0

@@ -138,7 +138,11 @@ def products_hash(products) -> str:
 
 
 def _parquet_frame(panel_dir: Path, columns: list[str]) -> pd.DataFrame | None:
-    for name in ("m5_icdn_panel.parquet", "1c_icdn_panel.parquet", "dominick_icdn_panel.parquet"):
+    for name in (
+        "m5_icdn_panel.parquet",
+        "dunnhumby_icdn_panel.parquet",
+        "dominick_icdn_panel.parquet",
+    ):
         path = panel_dir / name
         if path.exists():
             return pd.read_parquet(path, columns=columns)
@@ -727,7 +731,7 @@ def panel_dirs(root: Path | None = None) -> list[Path]:
     out = []
     for panel in (
         root / "data" / "M5-walmart" / "panel",
-        root / "data" / "predict-future-sales-1c" / "panel",
+        root / "data" / "Dunnhumby" / "panel",
         root / "data" / "Dominick" / "panel",
     ):
         if panel.exists():

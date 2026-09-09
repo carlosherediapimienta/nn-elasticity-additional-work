@@ -83,9 +83,10 @@ def project_root(cwd: Path | None = None) -> Path:
 
 
 def model_datasets(root: Path, model: str, extras: dict | None = None) -> dict:
-    """Walmart M5, 1C, and Dominick panels, with per-model output directory `panel/<model>/`.
+    """Walmart M5, dunnhumby, and Dominick panels; outputs go to `panel/<model>/`.
 
-    `extras` is merged per dataset (ICDN bounds, category rule).
+    A dataset is included only if its ICDN parquet exists. `extras` is merged
+    per dataset (ICDN elasticity bounds, category rule).
     """
     extras = extras or {}
     specs = {

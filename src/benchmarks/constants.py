@@ -61,8 +61,8 @@ N_BOOT_ICDN = 100
 MLP_MAX_EPOCHS = 250
 MLP_PATIENCE = 15
 
-# Optuna budgets. MLP is currently a smoke search (1 trial); ICDN is 15.
-N_TRIALS_MLP = 100  
+# Nested Optuna trial budgets (inner expanding folds of outer train only).
+N_TRIALS_MLP = 100
 N_TRIALS_ICDN = 100
 
 # MedianPruner startup trials: MLP waits longer before pruning than ICDN.

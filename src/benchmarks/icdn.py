@@ -82,6 +82,8 @@ patch_panel_builder()
 patch_feature_builder_two_clocks()
 patch_icdn_smooth()
 
+# Paper design constants (not tuned on holdout). Bounds match the economic
+# quantity: own-price should be negative; Walmart FOODS_3 is tighter than beer/cereal.
 ICDN_EXTRAS = {
     "walmart": {
         "own_elasticity_bounds": (-3.5, 0.0),

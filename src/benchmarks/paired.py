@@ -27,9 +27,10 @@ from src.benchmarks.predict import (
 
 PAIR_ID_COLS = ["store_code", "product_i", "product_j", "kind"]
 ELAST_CLIP = {"own": (-5.0, 5.0), "cross": (-2.0, 2.0), "own_eq": (-5.0, 5.0)}
+# Figure clips only; they do not change stored elasticities. Keys match PANELS in analysis.ipynb.
 ELAST_CLIP_BY_DATASET = {
     "walmart": ELAST_CLIP,
-    "one_c": ELAST_CLIP,
+    "dunnhumby": {"own": (-5.0, 0.0), "cross": (-1.0, 1.0), "own_eq": (-5.0, 0.0)},
     "dominick": {"own": (-5.0, 0.0), "cross": (-1.0, 1.0), "own_eq": (-5.0, 0.0)},
 }
 
